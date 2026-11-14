@@ -15,6 +15,8 @@
   var LOSE_PAUSE = 0.6;        // seconds between losing a ball and the next ready phase
   var LEVEL_BONUS = 500, LIFE_BONUS = 100;
   var START_LIVES = 3;
+  var BRICK_FLASH = 60, PADDLE_SQUASH = 80; // ms
+  var TRAIL_LEN = 8;
 
   var T = Arcade.theme;
   var BRICK_COLORS = { '1': T.coral, '2': T.brass, '3': T.cyan, '4': T.magenta, 'P': T.green };
@@ -30,7 +32,15 @@
   var paddleX = (W - PADDLE_WIDTH) / 2;
   var paddleDir = 1; // last paddle movement direction (-1 left, 1 right)
   var ball = { x: W / 2, y: PADDLE_Y - BALL_R, vx: 0, vy: 0 };
-  var bricks = new Array(BRICK_COLS * BRICK_ROWS); // null or {hp, maxHp, color, power}
+  var bricks = new Array(BRICK_COLS * BRICK_ROWS); // null or {hp, maxHp, color, power, flashUntil}
+  var brokenFlashes = [];   // {x, y, w, h, until} — white ghost of a brick that just broke
+  var squashUntil = 0;      // paddle squash animation end time
+  var trail = [];           // last TRAIL_LEN ball positions
+  var reducedMotion = false;
+  try {
+    var rmq = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
+    if (rmq) { reducedMotion = rmq.matches; if (rmq.addEventListener) rmq.addEventListener('change', function (e) { reducedMotion = e.matches; }); }
+  } catch (e) { /* no matchMedia */ }
 
   // ------------------------------------------------------------ setup
   Arcade.init({ game: 'brick-breaker', title: 'Brick Breaker', onRestart: startGame });
@@ -45,6 +55,9 @@
 
   // ------------------------------------------------------------ helpers
   function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function now() { return performance.now(); }
+  function shake(amp, ms) { if (!reducedMotion) Arcade.fx.shake(amp, ms); }
+  function hitstop(ms) { if (!reducedMotion) Arcade.fx.hitstop(ms); }
   function fmt(n) { return Number(n).toLocaleString('en-US'); }
   function coral(s) { return '<span style="color:' + T.coral + '">' + s + '</span>'; }
   function tileIndex(col, row) { return col + BRICK_COLS * row; }
@@ -81,11 +94,12 @@
         var ch = line.charAt(col) || '.';
         if (ch === '.' || ch === '') { bricks[tileIndex(col, row)] = null; continue; }
         var hp = ch === '4' ? 2 + loop : 1;
-        bricks[tileIndex(col, row)] = { hp: hp, maxHp: hp, color: BRICK_COLORS[ch] || T.text, power: ch === 'P' };
+        bricks[tileIndex(col, row)] = { hp: hp, maxHp: hp, color: BRICK_COLORS[ch] || T.text, power: ch === 'P', flashUntil: 0 };
         bricksLeft++;
       }
     }
     ballSpeed = Math.min(BALL_SPEED_MAX, BALL_SPEED * (1 + 0.05 * (n - 1)));
+    brokenFlashes = [];
   }
 
   function enterReady() {
@@ -93,6 +107,7 @@
     combo = 0;
     ball.vx = 0; ball.vy = 0;
     ball.x = paddleX + PADDLE_WIDTH / 2; ball.y = PADDLE_Y - BALL_R;
+    trail = [];
   }
 
   function launch() {
@@ -106,7 +121,7 @@
     lives--;
     combo = 0;
     Arcade.sfx.play('lose');
-    Arcade.fx.shake(6, 200);
+    shake(6, 200);
     phase = 'lost';
     lostTimer = LOSE_PAUSE;
   }
@@ -116,6 +131,7 @@
     var bonus = LEVEL_BONUS + LIFE_BONUS * lives;
     score += bonus;
     Arcade.sfx.play('win');
+    Arcade.fx.flash('rgba(226,187,110,0.5)', 250);
     Arcade.ui.overlay({
       title: 'Level ' + level + ' clear',
       lines: ['+' + LEVEL_BONUS + ' level bonus', '+' + LIFE_BONUS + ' × ' + lives + ' lives = +' + (LIFE_BONUS * lives)],
@@ -163,6 +179,8 @@
         break;
       case 'play':
         updateBall(dt);
+        trail.push({ x: ball.x, y: ball.y });
+        if (trail.length > TRAIL_LEN) trail.shift();
         if (phase === 'play' && bricksLeft <= 0) levelClear();
         break;
       case 'lost':
@@ -203,9 +221,9 @@
     collideBricks();
 
     // walls
-    if (ball.x + BALL_R > W) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); }
-    if (ball.x - BALL_R < 0) { ball.x = BALL_R; ball.vx = Math.abs(ball.vx); }
-    if (ball.y - BALL_R < 0) { ball.y = BALL_R; ball.vy = Math.abs(ball.vy); }
+    if (ball.x + BALL_R > W) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); Arcade.sfx.play('tick'); }
+    if (ball.x - BALL_R < 0) { ball.x = BALL_R; ball.vx = Math.abs(ball.vx); Arcade.sfx.play('tick'); }
+    if (ball.y - BALL_R < 0) { ball.y = BALL_R; ball.vy = Math.abs(ball.vy); Arcade.sfx.play('tick'); }
 
     // paddle
     if (ball.vy > 0 && ball.y + BALL_R >= PADDLE_Y && ball.y - BALL_R <= PADDLE_Y + PADDLE_HEIGHT &&
@@ -213,6 +231,8 @@
       ball.y = PADDLE_Y - BALL_R;
       bounceOffPaddle();
       combo = 0;
+      squashUntil = now() + PADDLE_SQUASH;
+      Arcade.sfx.play('bounce');
       return false;
     }
 
@@ -253,9 +273,16 @@
     if (row < 0 || row >= BRICK_ROWS || col < 0 || col >= BRICK_COLS) return false;
     var idx = tileIndex(col, row), b = bricks[idx];
     if (!b) return false;
+    var bx = brickX(col), by = brickY(row), bw = BRICK_W - BRICK_GAP, bh = BRICK_H - BRICK_GAP;
+    var wasHard = b.maxHp > 1 && b.hp === b.maxHp;
     b.hp--;
-    if (b.hp > 0) return true; // dented, still there
+    Arcade.sfx.play('hit', combo);
+    hitstop(combo >= 3 ? 40 : 20);
+    shake(1 + Math.min(combo, 6) * 0.5, 100);
+    Arcade.fx.burst(bx + bw / 2, by + bh / 2, { color: wasHard ? T.line : b.color, count: 8, speed: 220, life: 0.45 });
+    if (b.hp > 0) { b.flashUntil = now() + BRICK_FLASH; return true; } // dented, still there
     bricks[idx] = null;
+    brokenFlashes.push({ x: bx, y: by, w: bw, h: bh, until: now() + BRICK_FLASH });
     bricksLeft--;
     score += 10 * (1 + combo);
     combo++;
@@ -281,9 +308,10 @@
     c.fillStyle = T.black;
     c.fillRect(0, 0, W, H);
     drawBricks(c);
-    c.fillStyle = T.text;
-    c.fillRect(paddleX, PADDLE_Y, PADDLE_WIDTH, PADDLE_HEIGHT);
+    drawPaddle(c, paddleX, PADDLE_WIDTH);
     if (phase !== 'lost') {
+      drawTrail(c);
+      c.fillStyle = T.text;
       c.beginPath();
       c.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
       c.fill();
@@ -293,13 +321,42 @@
     }
   }
 
+  // Paddle squashes (wider, flatter) for a moment after a hit.
+  function drawPaddle(c, x, w) {
+    var t = now(), pw = w, ph = PADDLE_HEIGHT;
+    if (t < squashUntil) { pw = w * 1.1; ph = PADDLE_HEIGHT * 0.7; }
+    c.fillStyle = T.text;
+    c.fillRect(x + (w - pw) / 2, PADDLE_Y + (PADDLE_HEIGHT - ph), pw, ph);
+  }
+
+  function drawTrail(c) {
+    var n = trail.length;
+    for (var i = 0; i < n; i++) {
+      var k = (i + 1) / (n + 1); // oldest → faintest/smallest
+      c.globalAlpha = 0.35 * k;
+      c.fillStyle = T.text;
+      c.beginPath();
+      c.arc(trail[i].x, trail[i].y, BALL_R * (0.3 + 0.6 * k), 0, Math.PI * 2);
+      c.fill();
+    }
+    c.globalAlpha = 1;
+  }
+
   function drawBricks(c) {
+    var t = now();
+    for (var i = brokenFlashes.length - 1; i >= 0; i--) {
+      var f = brokenFlashes[i];
+      if (t >= f.until) { brokenFlashes.splice(i, 1); continue; }
+      c.fillStyle = T.white; c.fillRect(f.x, f.y, f.w, f.h);
+    }
     for (var row = 0; row < BRICK_ROWS; row++) {
       for (var col = 0; col < BRICK_COLS; col++) {
         var b = bricks[tileIndex(col, row)];
         if (!b) continue;
         var x = brickX(col), y = brickY(row), w = BRICK_W - BRICK_GAP, h = BRICK_H - BRICK_GAP;
-        if (b.maxHp > 1 && b.hp === b.maxHp) { // hard brick, not yet dented
+        if (t < b.flashUntil) {
+          c.fillStyle = T.white; c.fillRect(x, y, w, h);
+        } else if (b.maxHp > 1 && b.hp === b.maxHp) { // hard brick, not yet dented
           c.fillStyle = T.surface2; c.fillRect(x, y, w, h);
           c.strokeStyle = T.line; c.lineWidth = 1; c.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
         } else {
@@ -314,13 +371,14 @@
   window.BrickBreaker = {
     state: function () {
       return { phase: phase, lives: lives, score: score, combo: combo, maxCombo: maxCombo, level: level,
-        bricksLeft: bricksLeft, ballSpeed: ballSpeed, maxBrickHp: bricks.reduce(function (m, b) { return b && b.maxHp > m ? b.maxHp : m; }, 0),
+        bricksLeft: bricksLeft, ballSpeed: ballSpeed, reducedMotion: reducedMotion, maxBrickHp: bricks.reduce(function (m, b) { return b && b.maxHp > m ? b.maxHp : m; }, 0),
         ball: { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy }, paddleX: paddleX };
     },
     share: shareString,
     debug: {
       clearLevel: function () { for (var i = 0; i < bricks.length; i++) bricks[i] = null; bricksLeft = 0; },
-      loseBall: function () { if (phase === 'play') loseBall(); }
+      loseBall: function () { if (phase === 'play') loseBall(); },
+      setBall: function (x, y, vx, vy) { ball.x = x; ball.y = y; ball.vx = vx; ball.vy = vy; }
     }
   };
 })();
