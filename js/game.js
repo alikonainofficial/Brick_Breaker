@@ -52,6 +52,8 @@
   var bolts = [];           // {x, y}
   var power = null;         // active timed power-up: {type, time, total}
   var laserCooldown = 0;
+  var overlayAction = null; // action of the game overlay currently showing (see showOverlay)
+  var overlayOpts = null;   // that overlay's options, so it can come back after a pause
   var reducedMotion = false;
   try {
     var rmq = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -59,12 +61,24 @@
   } catch (e) { /* no matchMedia */ }
 
   // ------------------------------------------------------------ setup
-  Arcade.init({ game: 'brick-breaker', title: 'Brick Breaker', onRestart: startGame });
+  Arcade.init({ game: 'brick-breaker', title: 'Brick Breaker', onRestart: startGame, onPauseChange: onPauseChange });
   bestScore = Arcade.store.get('best', 0) || 0;
   Arcade.input.capture(['ArrowLeft', 'ArrowRight', 'Space']);
   Arcade.input.onPointerMove(function (p) { movePaddleTo(p.x - paddleW / 2); });
   Arcade.touch.buttons([{ label: '◀', code: 'ArrowLeft' }, { label: '▶', code: 'ArrowRight' }], 'left');
   Arcade.touch.buttons([{ label: 'GO', code: 'Space' }], 'right');
+
+  // The shell runs an overlay's action on Space/Enter or a tap on the backdrop; make a tap on the
+  // text box itself count too, so phone players can tap anywhere to launch / continue.
+  var overlayEl = document.querySelector('.arcade-overlay');
+  if (overlayEl) {
+    overlayEl.addEventListener('click', function (e) {
+      if (e.target === overlayEl || !overlayAction || Arcade.isPaused() || !Arcade.ui.overlayVisible()) return; // backdrop / pause box: the shell handles it
+      if (e.target.closest && e.target.closest('button')) return;
+      var a = overlayAction; overlayAction = null;
+      Arcade.ui.hideOverlay(); a();
+    });
+  }
 
   startGame();
   Arcade.loop(update, draw);
@@ -84,9 +98,22 @@
     return '🧱 Brick Breaker · ' + fmt(score) + ' pts · level ' + level + ' · best combo ×' + maxCombo;
   }
   function newBall(x, y, vx, vy) { return { x: x, y: y, vx: vx, vy: vy, trail: [], stuck: null }; }
+  function showOverlay(o) {
+    var a = o.action;
+    overlayAction = a || null;
+    overlayOpts = a ? o : null;
+    if (a) o.action = function () { overlayAction = null; overlayOpts = null; a(); };
+    Arcade.ui.overlay(o);
+  }
+  // The shell's pause overlay replaces ours and is hidden on resume; put ours back so a
+  // tab switch during "Level clear" or "Game over" doesn't leave the game stuck without one.
+  function onPauseChange(paused) {
+    if (!paused && overlayAction && overlayOpts) Arcade.ui.overlay(overlayOpts);
+  }
 
   // ------------------------------------------------------------ game flow
   function startGame() {
+    overlayAction = null; overlayOpts = null;
     lives = START_LIVES; score = 0; combo = 0; maxCombo = 0; level = 1;
     paddleX = (W - PADDLE_WIDTH) / 2; paddleDir = 1;
     endPower();
@@ -94,10 +121,10 @@
     enterReady();
     if (firstStart) {
       firstStart = false;
-      Arcade.ui.overlay({
+      showOverlay({
         title: 'Brick Breaker',
         lines: ['Move: mouse, arrows or drag', 'Launch: Space or tap'],
-        hint: 'Press Space',
+        hint: 'Press Space or tap',
         action: launch
       });
     }
@@ -155,7 +182,7 @@
     capsules.forEach(function (cp) { Arcade.fx.burst(cp.x + CAPSULE_W / 2, cp.y + CAPSULE_H / 2, { color: POWER_COLORS[cp.type], count: 12, speed: 200, life: 0.5 }); });
     capsules = []; bolts = [];
     endPower();
-    Arcade.ui.overlay({
+    showOverlay({
       title: 'Level ' + level + ' clear',
       lines: ['+' + LEVEL_BONUS + ' level bonus', '+' + LIFE_BONUS + ' × ' + lives + ' lives = +' + (LIFE_BONUS * lives)],
       hint: 'Space for level ' + (level + 1),
@@ -175,7 +202,7 @@
     bestScore = r.best;
     Arcade.store.bumpPlays();
     Arcade.store.set('lastScore', score);
-    Arcade.ui.overlay({
+    showOverlay({
       kicker: 'Game over',
       title: fmt(score),
       lines: [
@@ -544,6 +571,12 @@
     },
     share: shareString,
     debug: {
+      brickAt: function (px, py) { // read-only: is there a live brick under this canvas point?
+        var col = Math.floor(px / BRICK_W), row = Math.floor((py - BRICK_TOP) / BRICK_H);
+        if (row < 0 || row >= BRICK_ROWS || col < 0 || col >= BRICK_COLS) return false;
+        var bx = brickX(col), by = brickY(row);
+        return !!bricks[tileIndex(col, row)] && px < bx + BRICK_W - BRICK_GAP && py < by + BRICK_H - BRICK_GAP;
+      },
       clearLevel: function () { for (var i = 0; i < bricks.length; i++) bricks[i] = null; bricksLeft = 0; },
       loseBall: function () { if (phase === 'play') loseBall(); },
       setBall: function (x, y, vx, vy) { var b = balls[0]; if (b) { b.x = x; b.y = y; b.vx = vx; b.vy = vy; b.stuck = null; } },
