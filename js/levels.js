@@ -1,2 +1,101 @@
-/* levels.js — designed brick layouts for Brick Breaker. Filled in by step 2 of PLAN.md. */
-var LEVELS = [];
+/*
+ * levels.js — designed brick layouts for Brick Breaker.
+ *
+ * LEVELS is an array of string grids: 10 columns wide, up to 11 rows tall.
+ *   .  empty
+ *   1  coral brick, 1 hp
+ *   2  brass brick, 1 hp
+ *   3  cyan brick,  1 hp
+ *   4  hard brick,  2 hp (drawn dark until hit once; +1 hp per loop past level 8)
+ *   P  brick that always drops a power-up
+ * After the last level the list loops with harder 4-bricks and a faster ball.
+ */
+var LEVELS = [
+  // 1 — solid block
+  [
+    '1111111111',
+    '2222222222',
+    '3333333333',
+    '1111P11111',
+    '2222222222',
+    '3333333333'
+  ],
+  // 2 — diamond
+  [
+    '....22....',
+    '...2222...',
+    '..222222..',
+    '.22222222.',
+    '2222P22222',
+    '.22222222.',
+    '..222222..',
+    '...2222...',
+    '....22....'
+  ],
+  // 3 — heart
+  [
+    '.11....11.',
+    '1111..1111',
+    '1111111111',
+    '1111P11111',
+    '.11111111.',
+    '..111111..',
+    '...1111...',
+    '....11....'
+  ],
+  // 4 — two columns with a gap
+  [
+    '3333..3333',
+    '3333..3333',
+    '3333..3333',
+    '33P3..3P33',
+    '3333..3333',
+    '3333..3333',
+    '3333..3333',
+    '3333..3333'
+  ],
+  // 5 — space invader
+  [
+    '....33....',
+    '...3333...',
+    '..333333..',
+    '.33.33.33.',
+    '.333PP333.',
+    '...3..3...',
+    '..3.33.3..',
+    '.3.3..3.3.'
+  ],
+  // 6 — "AK"
+  [
+    '.22..1...1',
+    '2..2.1..1.',
+    '2..2.1.1..',
+    '2P22.11...',
+    '2..2.1.1..',
+    '2..2.1..1.',
+    '2..2.1...1'
+  ],
+  // 7 — checkerboard
+  [
+    '1.2.3.1.2.',
+    '.3.1.2.3.1',
+    '2.3.1.2.3.',
+    '.1.2.3.1.2',
+    '3.1.2.3.1.',
+    '.2.3.1.2.3',
+    '1.2.3.P.2.',
+    '.3.1.2.3.1'
+  ],
+  // 8 — fortress with 2-hp walls
+  [
+    '4444444444',
+    '4........4',
+    '4.111111.4',
+    '4.1P22P1.4',
+    '4.122221.4',
+    '4.1P22P1.4',
+    '4.111111.4',
+    '4........4',
+    '44.4444.44'
+  ]
+];
