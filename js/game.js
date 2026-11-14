@@ -54,6 +54,7 @@
   var laserCooldown = 0;
   var overlayAction = null; // action of the game overlay currently showing (see showOverlay)
   var overlayOpts = null;   // that overlay's options, so it can come back after a pause
+  var swallowSpace = false; // the GO press that just closed an overlay must not also launch / fire
   var reducedMotion = false;
   try {
     var rmq = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -66,7 +67,24 @@
   Arcade.input.capture(['ArrowLeft', 'ArrowRight', 'Space']);
   Arcade.input.onPointerMove(function (p) { movePaddleTo(p.x - paddleW / 2); });
   Arcade.touch.buttons([{ label: '◀', code: 'ArrowLeft' }, { label: '▶', code: 'ArrowRight' }], 'left');
-  Arcade.touch.buttons([{ label: 'GO', code: 'Space' }], 'right');
+  Arcade.touch.buttons([{ label: 'GO', code: 'Space', onDown: onGo }], 'right');
+
+  // Wording for the controls this player actually has: touch buttons appear on coarse
+  // pointers (the shell's own test), so phones get tap / GO / drag, desktops get keys / mouse.
+  var TOUCH = Arcade.touch.isCoarse();
+  var COPY = TOUCH ? {
+    startLines: ['Move: drag or ◀ ▶', 'Launch: tap or GO'],
+    startHint: 'Tap or press GO',
+    launch: 'Tap or GO to launch',
+    next: function (n) { return 'Tap or GO for level ' + n; },
+    again: 'Tap or GO to play again'
+  } : {
+    startLines: ['Move: mouse, ← → or A D', 'Launch: Space or click', 'Pause: P · Restart: R'],
+    startHint: 'Press Space or click',
+    launch: 'Space or click to launch',
+    next: function (n) { return 'Space for level ' + n; },
+    again: 'Space to play again'
+  };
 
   // The shell runs an overlay's action on Space/Enter or a tap on the backdrop; make a tap on the
   // text box itself count too, so phone players can tap anywhere to launch / continue.
@@ -111,6 +129,20 @@
     if (!paused && overlayAction && overlayOpts) Arcade.ui.overlay(overlayOpts);
   }
 
+  // The GO touch button fakes a Space key straight into Arcade.input, which skips the shell's
+  // keyboard handling of overlays. Give it the same meaning Space has on the keyboard: resume a
+  // pause, or run the showing overlay's action (start, next level, play again) — and swallow
+  // that press so it doesn't also launch the ball on the next frame.
+  function onGo() {
+    if (Arcade.isPaused()) { swallowSpace = true; Arcade.pause(false); return; }
+    if (overlayAction && Arcade.ui.overlayVisible()) {
+      var a = overlayAction; overlayAction = null; overlayOpts = null;
+      swallowSpace = true;
+      Arcade.ui.hideOverlay(); a();
+    }
+  }
+  function spacePressed() { return Arcade.input.wasPressed('Space') && !swallowSpace; }
+
   // ------------------------------------------------------------ game flow
   function startGame() {
     overlayAction = null; overlayOpts = null;
@@ -123,8 +155,8 @@
       firstStart = false;
       showOverlay({
         title: 'Brick Breaker',
-        lines: ['Move: mouse, arrows or drag', 'Launch: Space or tap'],
-        hint: 'Press Space or tap',
+        lines: COPY.startLines,
+        hint: COPY.startHint,
         action: launch
       });
     }
@@ -185,7 +217,7 @@
     showOverlay({
       title: 'Level ' + level + ' clear',
       lines: ['+' + LEVEL_BONUS + ' level bonus', '+' + LIFE_BONUS + ' × ' + lives + ' lives = +' + (LIFE_BONUS * lives)],
-      hint: 'Space for level ' + (level + 1),
+      hint: COPY.next(level + 1),
       action: nextLevel
     });
   }
@@ -213,7 +245,7 @@
         { label: 'Play again', onClick: function () { Arcade.restart(); } },
         { label: 'Copy result', keepOpen: true, onClick: function () { Arcade.share.copy(shareString()); } }
       ],
-      hint: 'Space to play again',
+      hint: COPY.again,
       action: function () { Arcade.restart(); }
     });
   }
@@ -290,7 +322,7 @@
 
   function updatePowerUps(dt) {
     var inp = Arcade.input, i;
-    var fire = inp.wasPressed('Space') || inp.pointer.justDown;
+    var fire = spacePressed() || inp.pointer.justDown;
 
     // timer
     if (power) {
@@ -331,7 +363,7 @@
     switch (phase) {
       case 'ready':
         balls[0].x = paddleX + paddleW / 2; balls[0].y = PADDLE_Y - BALL_R;
-        if (inp.wasPressed('Space') || inp.pointer.justDown) launch();
+        if (spacePressed() || inp.pointer.justDown) launch();
         break;
       case 'play':
         updateBalls(dt);
@@ -343,6 +375,7 @@
         if (lostTimer <= 0) { if (lives > 0) enterReady(); else gameOver(); }
         break;
     }
+    swallowSpace = false;
     updateHud();
   }
 
@@ -486,7 +519,7 @@
       for (var i = 0; i < balls.length; i++) drawBall(c, balls[i]);
     }
     if (phase === 'ready' && !Arcade.ui.overlayVisible()) {
-      Arcade.ui.text(c, 'Space or tap to launch', W / 2, PADDLE_Y - 40, { align: 'center', color: T.muted, size: 16 });
+      Arcade.ui.text(c, COPY.launch, W / 2, PADDLE_Y - 40, { align: 'center', color: T.muted, size: 16 });
     }
   }
 
