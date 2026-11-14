@@ -11,11 +11,11 @@ Plain static site: `index.html`, `css/`, `js/`. No build step, no dependencies.
 | --- | --- | --- |
 | Move paddle | `←` `→` or `A` `D` | move the mouse / drag on the canvas, or the ◀ ▶ buttons on phones |
 | Launch ball, release a caught ball, fire the laser | `Space` | tap the canvas, or the `GO` button on phones |
-| Pause / resume | `P` or `Esc` | — |
+| Pause / resume | `P` or `Esc` | `GO` resumes on phones |
 | Restart | `R` | — |
 | Sound on/off | — | the *Sound* button above the game |
 
-Switching tabs pauses the game automatically.
+Switching tabs pauses the game automatically. On phones, `GO` (or a tap) also starts, continues to the next level and plays again from the overlays, and the on-screen instructions describe the touch controls instead of the keyboard.
 
 ## Scoring
 
