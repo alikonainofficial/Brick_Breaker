@@ -1,25 +1,38 @@
 /*
  * game.js — Brick Breaker. Loads after js/arcade-shell.js and js/levels.js.
- * A 3-ball, scored, levelled Breakout on the shared arcade shell.
+ * A 3-ball, scored, levelled Breakout with combos, designed layouts, power-ups
+ * and the shell's juice layer. Plain script, no build step.
  */
 (function () {
   'use strict';
 
   var W = 800, H = 600;
 
-  var PADDLE_WIDTH = 100, PADDLE_HEIGHT = 10, PADDLE_Y = 540, PADDLE_SPEED = 600;
+  var PADDLE_WIDTH = 100, PADDLE_WIDE = 150, PADDLE_HEIGHT = 10, PADDLE_Y = 540, PADDLE_SPEED = 600;
   var BRICK_W = 80, BRICK_H = 20, BRICK_GAP = 2, BRICK_COLS = 10, BRICK_ROWS = 11, BRICK_TOP = 60;
   var BALL_R = 10, BALL_SPEED = 320, BALL_SPEED_MAX = 560;
-  var MIN_VY_RATIO = 0.25;     // keeps the ball from bouncing nearly horizontally forever
+  var MIN_VY_RATIO = 0.25;        // keeps the ball from bouncing nearly horizontally forever
   var LAUNCH_ANGLE = Math.PI / 3; // 60°
-  var LOSE_PAUSE = 0.6;        // seconds between losing a ball and the next ready phase
+  var LOSE_PAUSE = 0.6;           // seconds between losing a ball and the next ready phase
   var LEVEL_BONUS = 500, LIFE_BONUS = 100;
   var START_LIVES = 3;
   var BRICK_FLASH = 60, PADDLE_SQUASH = 80; // ms
   var TRAIL_LEN = 8;
 
+  // power-ups
+  var CAPSULE_W = 24, CAPSULE_H = 12, CAPSULE_SPEED = 140, DROP_CHANCE = 0.12;
+  var SLOW_FACTOR = 0.7, LASER_SPEED = 500, LASER_COOLDOWN = 0.4, BOLT_W = 4, BOLT_H = 12;
+  var POWERS = {
+    W: { name: 'Wide',  weight: 30, duration: 15 },
+    M: { name: 'Multi', weight: 20, duration: 0 },
+    S: { name: 'Slow',  weight: 20, duration: 10 },
+    C: { name: 'Catch', weight: 15, duration: 12 },
+    L: { name: 'Laser', weight: 15, duration: 10 }
+  };
+
   var T = Arcade.theme;
   var BRICK_COLORS = { '1': T.coral, '2': T.brass, '3': T.cyan, '4': T.magenta, 'P': T.green };
+  var POWER_COLORS = { W: T.brass, M: T.magenta, S: T.cyan, C: T.green, L: T.coral };
 
   // ------------------------------------------------------------ state
   var phase = 'ready'; // 'ready' | 'play' | 'lost' | 'levelClear' | 'over'
@@ -29,13 +42,16 @@
   var firstStart = true;
   var bestScore = 0; // read after Arcade.init sets the storage namespace
 
-  var paddleX = (W - PADDLE_WIDTH) / 2;
+  var paddleX = (W - PADDLE_WIDTH) / 2, paddleW = PADDLE_WIDTH;
   var paddleDir = 1; // last paddle movement direction (-1 left, 1 right)
-  var ball = { x: W / 2, y: PADDLE_Y - BALL_R, vx: 0, vy: 0 };
+  var balls = [];    // {x, y, vx, vy, trail: [], stuck: null | offset from paddleX}
   var bricks = new Array(BRICK_COLS * BRICK_ROWS); // null or {hp, maxHp, color, power, flashUntil}
   var brokenFlashes = [];   // {x, y, w, h, until} — white ghost of a brick that just broke
   var squashUntil = 0;      // paddle squash animation end time
-  var trail = [];           // last TRAIL_LEN ball positions
+  var capsules = [];        // {x, y, type}
+  var bolts = [];           // {x, y}
+  var power = null;         // active timed power-up: {type, time, total}
+  var laserCooldown = 0;
   var reducedMotion = false;
   try {
     var rmq = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -46,7 +62,7 @@
   Arcade.init({ game: 'brick-breaker', title: 'Brick Breaker', onRestart: startGame });
   bestScore = Arcade.store.get('best', 0) || 0;
   Arcade.input.capture(['ArrowLeft', 'ArrowRight', 'Space']);
-  Arcade.input.onPointerMove(function (p) { movePaddleTo(p.x - PADDLE_WIDTH / 2); });
+  Arcade.input.onPointerMove(function (p) { movePaddleTo(p.x - paddleW / 2); });
   Arcade.touch.buttons([{ label: '◀', code: 'ArrowLeft' }, { label: '▶', code: 'ArrowRight' }], 'left');
   Arcade.touch.buttons([{ label: 'GO', code: 'Space' }], 'right');
 
@@ -56,21 +72,24 @@
   // ------------------------------------------------------------ helpers
   function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
   function now() { return performance.now(); }
-  function shake(amp, ms) { if (!reducedMotion) Arcade.fx.shake(amp, ms); }
-  function hitstop(ms) { if (!reducedMotion) Arcade.fx.hitstop(ms); }
   function fmt(n) { return Number(n).toLocaleString('en-US'); }
   function coral(s) { return '<span style="color:' + T.coral + '">' + s + '</span>'; }
+  function shake(amp, ms) { if (!reducedMotion) Arcade.fx.shake(amp, ms); }
+  function hitstop(ms) { if (!reducedMotion) Arcade.fx.hitstop(ms); }
   function tileIndex(col, row) { return col + BRICK_COLS * row; }
   function brickX(col) { return col * BRICK_W; }
   function brickY(row) { return BRICK_TOP + row * BRICK_H; }
+  function curSpeed() { return ballSpeed * (power && power.type === 'S' ? SLOW_FACTOR : 1); }
   function shareString() {
     return '🧱 Brick Breaker · ' + fmt(score) + ' pts · level ' + level + ' · best combo ×' + maxCombo;
   }
+  function newBall(x, y, vx, vy) { return { x: x, y: y, vx: vx, vy: vy, trail: [], stuck: null }; }
 
   // ------------------------------------------------------------ game flow
   function startGame() {
     lives = START_LIVES; score = 0; combo = 0; maxCombo = 0; level = 1;
     paddleX = (W - PADDLE_WIDTH) / 2; paddleDir = 1;
+    endPower();
     loadLevel(level);
     enterReady();
     if (firstStart) {
@@ -99,27 +118,28 @@
       }
     }
     ballSpeed = Math.min(BALL_SPEED_MAX, BALL_SPEED * (1 + 0.05 * (n - 1)));
-    brokenFlashes = [];
+    brokenFlashes = []; capsules = []; bolts = [];
   }
 
   function enterReady() {
     phase = 'ready';
     combo = 0;
-    ball.vx = 0; ball.vy = 0;
-    ball.x = paddleX + PADDLE_WIDTH / 2; ball.y = PADDLE_Y - BALL_R;
-    trail = [];
+    balls = [newBall(paddleX + paddleW / 2, PADDLE_Y - BALL_R, 0, 0)];
   }
 
   function launch() {
     if (phase !== 'ready') return;
     phase = 'play';
-    ball.vx = Math.cos(LAUNCH_ANGLE) * ballSpeed * paddleDir;
-    ball.vy = -Math.sin(LAUNCH_ANGLE) * ballSpeed;
+    var b = balls[0], s = curSpeed();
+    b.vx = Math.cos(LAUNCH_ANGLE) * s * paddleDir;
+    b.vy = -Math.sin(LAUNCH_ANGLE) * s;
   }
 
   function loseBall() {
     lives--;
     combo = 0;
+    endPower();
+    capsules = []; bolts = [];
     Arcade.sfx.play('lose');
     shake(6, 200);
     phase = 'lost';
@@ -132,6 +152,9 @@
     score += bonus;
     Arcade.sfx.play('win');
     Arcade.fx.flash('rgba(226,187,110,0.5)', 250);
+    capsules.forEach(function (cp) { Arcade.fx.burst(cp.x + CAPSULE_W / 2, cp.y + CAPSULE_H / 2, { color: POWER_COLORS[cp.type], count: 12, speed: 200, life: 0.5 }); });
+    capsules = []; bolts = [];
+    endPower();
     Arcade.ui.overlay({
       title: 'Level ' + level + ' clear',
       lines: ['+' + LEVEL_BONUS + ' level bonus', '+' + LIFE_BONUS + ' × ' + lives + ' lives = +' + (LIFE_BONUS * lives)],
@@ -168,19 +191,124 @@
     });
   }
 
+  // ------------------------------------------------------------ power-ups
+  function pickPowerType() {
+    var total = 0, k;
+    for (k in POWERS) total += POWERS[k].weight;
+    var r = Math.random() * total;
+    for (k in POWERS) { r -= POWERS[k].weight; if (r < 0) return k; }
+    return 'W';
+  }
+
+  function spawnCapsule(x, y, type) {
+    capsules.push({ x: x - CAPSULE_W / 2, y: y - CAPSULE_H / 2, type: type || pickPowerType() });
+  }
+
+  function activatePower(type) {
+    var def = POWERS[type];
+    if (type === 'M') { multiball(); return; }
+    if (power && power.type !== type) endPower();           // a new timed power-up replaces the old one
+    if (type === 'S' && !(power && power.type === 'S')) {   // slow down every ball once
+      balls.forEach(function (b) { b.vx *= SLOW_FACTOR; b.vy *= SLOW_FACTOR; });
+    }
+    if (type === 'W') setPaddleWidth(PADDLE_WIDE);
+    power = { type: type, time: def.duration, total: def.duration };
+    laserCooldown = 0;
+  }
+
+  function endPower() {
+    if (!power) return;
+    var type = power.type;
+    power = null;
+    if (type === 'S') balls.forEach(function (b) { b.vx /= SLOW_FACTOR; b.vy /= SLOW_FACTOR; });
+    if (type === 'W') setPaddleWidth(PADDLE_WIDTH);
+    if (type === 'C') releaseStuck();
+    bolts = [];
+  }
+
+  function setPaddleWidth(w) {
+    var cx = paddleX + paddleW / 2;
+    paddleW = w;
+    paddleX = clamp(cx - w / 2, 0, W - w);
+    balls.forEach(function (b) { if (b.stuck != null) b.stuck = clamp(b.stuck, BALL_R, paddleW - BALL_R); });
+  }
+
+  function multiball() {
+    var src = null;
+    for (var i = 0; i < balls.length; i++) { if (balls[i].stuck == null) { src = balls[i]; break; } }
+    src = src || balls[0];
+    if (!src) return;
+    var s = curSpeed(), a0 = (src.stuck == null && (src.vx || src.vy)) ? Math.atan2(src.vy, src.vx) : -Math.PI / 2;
+    [-Math.PI / 6, Math.PI / 6].forEach(function (da) {
+      balls.push(newBall(src.x, src.y, Math.cos(a0 + da) * s, Math.sin(a0 + da) * s));
+    });
+  }
+
+  function releaseStuck() {
+    balls.forEach(function (b) {
+      if (b.stuck == null) return;
+      b.stuck = null;
+      b.y = PADDLE_Y - BALL_R;
+      b.vy = curSpeed(); // bounceOffPaddle flips this upward and sets the angle from the offset
+      bounceOffPaddle(b);
+    });
+  }
+
+  function fireLaser() {
+    bolts.push({ x: paddleX + 4, y: PADDLE_Y - BOLT_H });
+    bolts.push({ x: paddleX + paddleW - 4 - BOLT_W, y: PADDLE_Y - BOLT_H });
+    laserCooldown = LASER_COOLDOWN;
+    Arcade.sfx.play('tick');
+  }
+
+  function updatePowerUps(dt) {
+    var inp = Arcade.input, i;
+    var fire = inp.wasPressed('Space') || inp.pointer.justDown;
+
+    // timer
+    if (power) {
+      power.time -= dt;
+      if (power.time <= 0) endPower();
+    }
+
+    // catch: release on Space / tap
+    if (fire) releaseStuck();
+
+    // laser: Space (held or tapped) fires every LASER_COOLDOWN
+    laserCooldown -= dt;
+    if (power && power.type === 'L' && (fire || inp.isDown('Space')) && laserCooldown <= 0) fireLaser();
+    for (i = bolts.length - 1; i >= 0; i--) {
+      var bt = bolts[i];
+      bt.y -= LASER_SPEED * dt;
+      if (bt.y + BOLT_H < 0 || hitBrickAt(bt.x + BOLT_W / 2, bt.y)) bolts.splice(i, 1);
+    }
+
+    // capsules fall; paddle catches them
+    for (i = capsules.length - 1; i >= 0; i--) {
+      var cp = capsules[i];
+      cp.y += CAPSULE_SPEED * dt;
+      if (cp.y > H) { capsules.splice(i, 1); continue; }
+      if (cp.y + CAPSULE_H >= PADDLE_Y && cp.y <= PADDLE_Y + PADDLE_HEIGHT && cp.x + CAPSULE_W > paddleX && cp.x < paddleX + paddleW) {
+        capsules.splice(i, 1);
+        Arcade.sfx.play('pickup');
+        Arcade.fx.burst(cp.x + CAPSULE_W / 2, cp.y + CAPSULE_H / 2, { color: POWER_COLORS[cp.type], count: 10, speed: 160, life: 0.4, size: 2 });
+        activatePower(cp.type);
+      }
+    }
+  }
+
   // ------------------------------------------------------------ update
   function update(dt) {
     updatePaddle(dt);
     var inp = Arcade.input;
     switch (phase) {
       case 'ready':
-        ball.x = paddleX + PADDLE_WIDTH / 2; ball.y = PADDLE_Y - BALL_R;
+        balls[0].x = paddleX + paddleW / 2; balls[0].y = PADDLE_Y - BALL_R;
         if (inp.wasPressed('Space') || inp.pointer.justDown) launch();
         break;
       case 'play':
-        updateBall(dt);
-        trail.push({ x: ball.x, y: ball.y });
-        if (trail.length > TRAIL_LEN) trail.shift();
+        updateBalls(dt);
+        if (phase === 'play') updatePowerUps(dt);
         if (phase === 'play' && bricksLeft <= 0) levelClear();
         break;
       case 'lost':
@@ -192,7 +320,7 @@
   }
 
   function movePaddleTo(x) {
-    var nx = clamp(x, 0, W - PADDLE_WIDTH);
+    var nx = clamp(x, 0, W - paddleW);
     if (nx !== paddleX) paddleDir = nx > paddleX ? 1 : -1;
     paddleX = nx;
   }
@@ -204,70 +332,85 @@
     if (dx !== 0 && !inp.pointer.down) movePaddleTo(paddleX + dx * PADDLE_SPEED * dt);
   }
 
-  // Move in sub-steps so a fast ball never tunnels through a brick or the paddle.
-  function updateBall(dt) {
-    var speed = Math.hypot(ball.vx, ball.vy);
+  function updateBalls(dt) {
+    for (var i = balls.length - 1; i >= 0; i--) {
+      var b = balls[i];
+      if (b.stuck != null) { b.x = paddleX + b.stuck; b.y = PADDLE_Y - BALL_R; continue; }
+      if (moveBall(b, dt)) { balls.splice(i, 1); continue; } // fell out
+      b.trail.push({ x: b.x, y: b.y });
+      if (b.trail.length > TRAIL_LEN) b.trail.shift();
+    }
+    if (balls.length === 0) loseBall(); // a lost extra ball costs nothing; the last one costs a life
+  }
+
+  // Move in sub-steps so a fast ball never tunnels through a brick or the paddle. Returns true if lost.
+  function moveBall(b, dt) {
+    var speed = Math.hypot(b.vx, b.vy);
     var steps = Math.max(1, Math.ceil((speed * dt) / (BALL_R * 0.5)));
     var sdt = dt / steps;
     for (var i = 0; i < steps; i++) {
-      if (stepBall(sdt)) break; // ball lost this step
+      if (stepBall(b, sdt)) return true;
+      if (b.stuck != null) return false;
     }
+    return false;
   }
 
-  function stepBall(dt) {
-    ball.x += ball.vx * dt;
-    ball.y += ball.vy * dt;
+  function stepBall(b, dt) {
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
 
-    collideBricks();
+    collideBricks(b);
 
     // walls
-    if (ball.x + BALL_R > W) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); Arcade.sfx.play('tick'); }
-    if (ball.x - BALL_R < 0) { ball.x = BALL_R; ball.vx = Math.abs(ball.vx); Arcade.sfx.play('tick'); }
-    if (ball.y - BALL_R < 0) { ball.y = BALL_R; ball.vy = Math.abs(ball.vy); Arcade.sfx.play('tick'); }
+    if (b.x + BALL_R > W) { b.x = W - BALL_R; b.vx = -Math.abs(b.vx); Arcade.sfx.play('tick'); }
+    if (b.x - BALL_R < 0) { b.x = BALL_R; b.vx = Math.abs(b.vx); Arcade.sfx.play('tick'); }
+    if (b.y - BALL_R < 0) { b.y = BALL_R; b.vy = Math.abs(b.vy); Arcade.sfx.play('tick'); }
 
     // paddle
-    if (ball.vy > 0 && ball.y + BALL_R >= PADDLE_Y && ball.y - BALL_R <= PADDLE_Y + PADDLE_HEIGHT &&
-        ball.x + BALL_R > paddleX && ball.x - BALL_R < paddleX + PADDLE_WIDTH) {
-      ball.y = PADDLE_Y - BALL_R;
-      bounceOffPaddle();
+    if (b.vy > 0 && b.y + BALL_R >= PADDLE_Y && b.y - BALL_R <= PADDLE_Y + PADDLE_HEIGHT &&
+        b.x + BALL_R > paddleX && b.x - BALL_R < paddleX + paddleW) {
+      b.y = PADDLE_Y - BALL_R;
       combo = 0;
       squashUntil = now() + PADDLE_SQUASH;
       Arcade.sfx.play('bounce');
+      if (power && power.type === 'C') { b.stuck = clamp(b.x - paddleX, BALL_R, paddleW - BALL_R); b.vx = 0; b.vy = 0; }
+      else bounceOffPaddle(b);
       return false;
     }
 
     // lost
-    if (ball.y - BALL_R > H) { loseBall(); return true; }
-    return false;
+    return b.y - BALL_R > H;
   }
 
-  // Outgoing angle depends on where the ball hits the paddle; magnitude stays at ballSpeed.
-  function bounceOffPaddle() {
-    var deltaX = ball.x - (paddleX + PADDLE_WIDTH / 2);
-    var vx = deltaX * 10.5, vy = -Math.abs(ball.vy) || -1;
+  // Outgoing angle depends on where the ball hits the paddle; magnitude stays at the current speed.
+  function bounceOffPaddle(b) {
+    var s = curSpeed();
+    var deltaX = b.x - (paddleX + paddleW / 2);
+    var vx = deltaX * (10.5 * PADDLE_WIDTH / paddleW), vy = -Math.abs(b.vy) || -1;
     var mag = Math.hypot(vx, vy) || 1;
-    vx = vx / mag * ballSpeed; vy = vy / mag * ballSpeed;
-    if (-vy < ballSpeed * MIN_VY_RATIO) { // too flat: steepen while keeping direction
-      vy = -ballSpeed * MIN_VY_RATIO;
-      vx = (vx < 0 ? -1 : 1) * Math.sqrt(ballSpeed * ballSpeed - vy * vy);
+    vx = vx / mag * s; vy = vy / mag * s;
+    if (-vy < s * MIN_VY_RATIO) { // too flat: steepen while keeping direction
+      vy = -s * MIN_VY_RATIO;
+      vx = (vx < 0 ? -1 : 1) * Math.sqrt(s * s - vy * vy);
     }
-    ball.vx = vx; ball.vy = vy;
+    b.vx = vx; b.vy = vy;
   }
 
   // Test the ball's leading edge points (the side it is travelling toward) against the grid:
   // the right point when moving right, the bottom point when moving down, and so on. A hit
   // on a horizontal point flips vx, on a vertical point flips vy — so a ball coming from the
   // left of a brick bounces back left, one from above bounces back up.
-  function collideBricks() {
+  function collideBricks(b) {
     var hitX = false, hitY = false;
-    if (ball.vx > 0 && hitBrickAt(ball.x + BALL_R, ball.y)) hitX = true;
-    else if (ball.vx < 0 && hitBrickAt(ball.x - BALL_R, ball.y)) hitX = true;
-    if (ball.vy > 0 && hitBrickAt(ball.x, ball.y + BALL_R)) hitY = true;
-    else if (ball.vy < 0 && hitBrickAt(ball.x, ball.y - BALL_R)) hitY = true;
-    if (hitX) ball.vx = -ball.vx;
-    if (hitY) ball.vy = -ball.vy;
+    if (b.vx > 0 && hitBrickAt(b.x + BALL_R, b.y)) hitX = true;
+    else if (b.vx < 0 && hitBrickAt(b.x - BALL_R, b.y)) hitX = true;
+    if (b.vy > 0 && hitBrickAt(b.x, b.y + BALL_R)) hitY = true;
+    else if (b.vy < 0 && hitBrickAt(b.x, b.y - BALL_R)) hitY = true;
+    if (hitX) b.vx = -b.vx;
+    if (hitY) b.vy = -b.vy;
   }
 
+  // Damage the brick under canvas point (px, py). Returns true if there was one (ball/bolt should stop).
   function hitBrickAt(px, py) {
     var col = Math.floor(px / BRICK_W), row = Math.floor((py - BRICK_TOP) / BRICK_H);
     if (row < 0 || row >= BRICK_ROWS || col < 0 || col >= BRICK_COLS) return false;
@@ -287,20 +430,21 @@
     score += 10 * (1 + combo);
     combo++;
     if (combo > maxCombo) maxCombo = combo;
+    if (b.power || Math.random() < DROP_CHANCE) spawnCapsule(bx + bw / 2, by + bh / 2);
     return true;
   }
 
   // ------------------------------------------------------------ hud
   function updateHud() {
-    var scoreV = fmt(score) + (combo >= 2 ? ' ' + coral('×' + combo) : '');
-    var bricksV = bricksLeft <= 3 ? coral(bricksLeft) : bricksLeft;
-    Arcade.ui.hud({
-      Score: scoreV,
+    var items = {
+      Score: fmt(score) + (combo >= 2 ? ' ' + coral('×' + combo) : ''),
       Best: fmt(Math.max(bestScore, score)),
       Level: level,
       Lives: '●'.repeat(Math.max(0, lives)),
-      'Bricks left': bricksV
-    });
+      'Bricks left': bricksLeft <= 3 ? coral(bricksLeft) : bricksLeft
+    };
+    if (power) items.Power = POWERS[power.type].name + ' ' + Math.ceil(power.time) + 's';
+    Arcade.ui.hud(items);
   }
 
   // ------------------------------------------------------------ draw
@@ -308,38 +452,58 @@
     c.fillStyle = T.black;
     c.fillRect(0, 0, W, H);
     drawBricks(c);
-    drawPaddle(c, paddleX, PADDLE_WIDTH);
+    drawCapsules(c);
+    drawBolts(c);
+    drawPaddle(c);
     if (phase !== 'lost') {
-      drawTrail(c);
-      c.fillStyle = T.text;
-      c.beginPath();
-      c.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
-      c.fill();
+      for (var i = 0; i < balls.length; i++) drawBall(c, balls[i]);
     }
     if (phase === 'ready' && !Arcade.ui.overlayVisible()) {
       Arcade.ui.text(c, 'Space or tap to launch', W / 2, PADDLE_Y - 40, { align: 'center', color: T.muted, size: 16 });
     }
   }
 
-  // Paddle squashes (wider, flatter) for a moment after a hit.
-  function drawPaddle(c, x, w) {
-    var t = now(), pw = w, ph = PADDLE_HEIGHT;
-    if (t < squashUntil) { pw = w * 1.1; ph = PADDLE_HEIGHT * 0.7; }
+  // Paddle squashes (wider, flatter) for a moment after a hit; a thin bar under it times the power-up.
+  function drawPaddle(c) {
+    var t = now(), pw = paddleW, ph = PADDLE_HEIGHT;
+    if (t < squashUntil) { pw = paddleW * 1.1; ph = PADDLE_HEIGHT * 0.7; }
     c.fillStyle = T.text;
-    c.fillRect(x + (w - pw) / 2, PADDLE_Y + (PADDLE_HEIGHT - ph), pw, ph);
+    c.fillRect(paddleX + (paddleW - pw) / 2, PADDLE_Y + (PADDLE_HEIGHT - ph), pw, ph);
+    if (power && power.total > 0) {
+      c.fillStyle = POWER_COLORS[power.type];
+      c.fillRect(paddleX, PADDLE_Y + PADDLE_HEIGHT + 4, paddleW * clamp(power.time / power.total, 0, 1), 3);
+    }
   }
 
-  function drawTrail(c) {
-    var n = trail.length;
+  function drawBall(c, b) {
+    var n = b.trail.length;
     for (var i = 0; i < n; i++) {
       var k = (i + 1) / (n + 1); // oldest → faintest/smallest
       c.globalAlpha = 0.35 * k;
       c.fillStyle = T.text;
       c.beginPath();
-      c.arc(trail[i].x, trail[i].y, BALL_R * (0.3 + 0.6 * k), 0, Math.PI * 2);
+      c.arc(b.trail[i].x, b.trail[i].y, BALL_R * (0.3 + 0.6 * k), 0, Math.PI * 2);
       c.fill();
     }
     c.globalAlpha = 1;
+    c.fillStyle = T.text;
+    c.beginPath();
+    c.arc(b.x, b.y, BALL_R, 0, Math.PI * 2);
+    c.fill();
+  }
+
+  function drawCapsules(c) {
+    for (var i = 0; i < capsules.length; i++) {
+      var cp = capsules[i];
+      c.fillStyle = POWER_COLORS[cp.type];
+      c.fillRect(cp.x, cp.y, CAPSULE_W, CAPSULE_H);
+      Arcade.ui.text(c, cp.type, cp.x + CAPSULE_W / 2, cp.y + CAPSULE_H / 2 + 1, { align: 'center', baseline: 'middle', size: 11, color: T.black });
+    }
+  }
+
+  function drawBolts(c) {
+    c.fillStyle = T.coral;
+    for (var i = 0; i < bolts.length; i++) c.fillRect(bolts[i].x, bolts[i].y, BOLT_W, BOLT_H);
   }
 
   function drawBricks(c) {
@@ -371,14 +535,20 @@
   window.BrickBreaker = {
     state: function () {
       return { phase: phase, lives: lives, score: score, combo: combo, maxCombo: maxCombo, level: level,
-        bricksLeft: bricksLeft, ballSpeed: ballSpeed, reducedMotion: reducedMotion, maxBrickHp: bricks.reduce(function (m, b) { return b && b.maxHp > m ? b.maxHp : m; }, 0),
-        ball: { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy }, paddleX: paddleX };
+        bricksLeft: bricksLeft, ballSpeed: ballSpeed, reducedMotion: reducedMotion,
+        maxBrickHp: bricks.reduce(function (m, b) { return b && b.maxHp > m ? b.maxHp : m; }, 0),
+        balls: balls.map(function (b) { return { x: b.x, y: b.y, vx: b.vx, vy: b.vy, stuck: b.stuck }; }),
+        ball: balls[0] ? { x: balls[0].x, y: balls[0].y, vx: balls[0].vx, vy: balls[0].vy } : null,
+        paddleX: paddleX, paddleW: paddleW, power: power ? { type: power.type, time: power.time } : null,
+        capsules: capsules.map(function (cp) { return { x: cp.x, y: cp.y, type: cp.type }; }), bolts: bolts.length };
     },
     share: shareString,
     debug: {
       clearLevel: function () { for (var i = 0; i < bricks.length; i++) bricks[i] = null; bricksLeft = 0; },
       loseBall: function () { if (phase === 'play') loseBall(); },
-      setBall: function (x, y, vx, vy) { ball.x = x; ball.y = y; ball.vx = vx; ball.vy = vy; }
+      setBall: function (x, y, vx, vy) { var b = balls[0]; if (b) { b.x = x; b.y = y; b.vx = vx; b.vy = vy; b.stuck = null; } },
+      givePower: function (type) { activatePower(type); },
+      spawnCapsule: function (type, x, y) { spawnCapsule(x == null ? paddleX + paddleW / 2 : x, y == null ? 400 : y, type); }
     }
   };
 })();
